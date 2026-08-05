@@ -23,7 +23,7 @@ Future<void> main() async {
 }
 
 bool _shouldUseSupabase() {
-  return kDebugMode;
+  return true;
 }
 
 class MyApp extends StatefulWidget {
