@@ -49,10 +49,13 @@ class _MyAppState extends State<MyApp> {
   final List<RoommateRentEntry> _roommateRentEntries = [];
   final List<RentEntry> _savedRentEntries = [];
   final List<MonthlyExpenseEntry> _monthlyExpenses = [];
+  final List<ChatMessage> _chatMessages = [];
+  final ValueNotifier<List<ChatMessage>> _chatMessagesNotifier = ValueNotifier(const []);
 
   UserAccount? _currentUser;
   bool _supabaseInitialized = false;
   bool _supabaseConnected = false;
+  RealtimeChannel? _chatChannel;
   int _debugUsersCount = 0;
   int _debugTasksCount = 0;
   int _debugMembersCount = 0;
@@ -248,25 +251,36 @@ class _MyAppState extends State<MyApp> {
     print('Supabase status: $message');
   }
 
-  Future<void> _initializeSupabase() async {
-    if (_supabaseInitialized || !_shouldUseSupabase()) {
-      return;
+  Future<bool> _initializeSupabase() async {
+    if (_supabaseInitialized && _supabaseConnected) {
+      return true;
+    }
+    if (!_shouldUseSupabase()) {
+      return false;
     }
 
     try {
       await Supabase.initialize(url: _supabaseUrl, publishableKey: _supabaseAnonKey);
       _supabaseInitialized = true;
+      _supabaseConnected = true;
       _setSupabaseStatus('Supabase connected', connected: true);
+      _subscribeToChatUpdates();
+      return true;
     } catch (error) {
       _supabaseInitialized = true;
+      _supabaseConnected = false;
       _setSupabaseStatus('Supabase error: $error', connected: false);
+      return false;
     }
   }
 
   Future<void> _loadRemoteData() async {
     try {
       print('Attempting to load data from Supabase...');
-      await _initializeSupabase();
+      final connected = await _initializeSupabase();
+      if (!connected) {
+        throw Exception('Supabase not initialized');
+      }
       final client = Supabase.instance.client;
       final usersResponse = await client.from('users').select() as List<dynamic>;
       final tasksResponse = await client.from('tasks').select() as List<dynamic>;
@@ -305,6 +319,7 @@ class _MyAppState extends State<MyApp> {
           ..addAll(_parseMonthlyExpenses(monthlyExpensesResponse));
         _debugStatus = 'Loaded $_debugUsersCount users / $_debugTasksCount tasks / $_debugMembersCount members';
       });
+      await _loadChatMessages();
       print('Supabase load succeeded: $_debugUsersCount users / $_debugTasksCount tasks / $_debugMembersCount members');
       _rebuildRoommateRentEntries();
     } catch (error) {
@@ -338,7 +353,10 @@ class _MyAppState extends State<MyApp> {
     });
 
     try {
-      await _initializeSupabase();
+      final connected = await _initializeSupabase();
+      if (!connected) {
+        throw Exception('Supabase not initialized');
+      }
       final client = Supabase.instance.client;
       print('Saving new user to Supabase: $normalizedUsername');
       final response = await client.from('users').insert({
@@ -401,7 +419,10 @@ class _MyAppState extends State<MyApp> {
     }
 
     try {
-      await _initializeSupabase();
+      final connected = await _initializeSupabase();
+      if (!connected) {
+        throw Exception('Supabase not initialized');
+      }
       final client = Supabase.instance.client;
       await client.from('rent_entries').insert({
         'month_label': entry.monthLabel,
@@ -422,7 +443,10 @@ class _MyAppState extends State<MyApp> {
     }
 
     try {
-      await _initializeSupabase();
+      final connected = await _initializeSupabase();
+      if (!connected) {
+        throw Exception('Supabase not initialized');
+      }
       final client = Supabase.instance.client;
       await client.from('monthly_expenses').insert({
         'title': entry.title,
@@ -435,6 +459,244 @@ class _MyAppState extends State<MyApp> {
       print('Failed to save monthly expense to Supabase: $error');
       _setSupabaseStatus('Failed to save monthly expense: $error', connected: false);
     }
+  }
+
+  Future<void> _loadChatMessages() async {
+    if (!_shouldUseSupabase()) {
+      return;
+    }
+
+    try {
+      final connected = await _initializeSupabase();
+      if (!connected) {
+        return;
+      }
+
+      final client = Supabase.instance.client;
+      final response = await client
+          .from('chat_messages')
+          .select()
+          .order('created_at', ascending: true) as List<dynamic>;
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _chatMessages
+          ..clear()
+          ..addAll(_parseChatMessages(response));
+        _chatMessagesNotifier.value = List<ChatMessage>.unmodifiable(_chatMessages);
+      });
+    } catch (error) {
+      print('Failed to load chat messages from Supabase: $error');
+      if (mounted) {
+        setState(() {
+          _supabaseConnected = false;
+          _debugStatus = 'Chat load failed: $error';
+        });
+      }
+    }
+  }
+
+  void _subscribeToChatUpdates() {
+    if (!_shouldUseSupabase()) {
+      return;
+    }
+
+    try {
+      final client = Supabase.instance.client;
+      _chatChannel?.unsubscribe();
+      _chatChannel = client
+          .channel('chat_messages')
+          .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'chat_messages',
+            callback: (payload) async {
+              await _loadChatMessages();
+            },
+          )
+          .subscribe((status, [error]) {
+            if (status == RealtimeSubscribeStatus.channelError ||
+                status == RealtimeSubscribeStatus.timedOut) {
+              print('Chat subscription issue: $status $error');
+            }
+          });
+    } catch (error) {
+      print('Failed to subscribe to chat updates: $error');
+    }
+  }
+
+  Future<void> _sendChatMessage({
+    required String senderUsername,
+    required String recipientUsername,
+    required String content,
+  }) async {
+    final trimmedContent = content.trim();
+    if (trimmedContent.isEmpty) {
+      return;
+    }
+
+    final message = ChatMessage(
+      senderUsername: senderUsername,
+      recipientUsername: recipientUsername,
+      content: trimmedContent,
+      createdAt: DateTime.now().toUtc(),
+      isRead: false,
+    );
+
+    setState(() {
+      _chatMessages.add(message);
+      _chatMessagesNotifier.value = List<ChatMessage>.unmodifiable(_chatMessages);
+    });
+
+    if (!_shouldUseSupabase()) {
+      return;
+    }
+
+    try {
+      final connected = await _initializeSupabase();
+      if (!connected) {
+        return;
+      }
+
+      final client = Supabase.instance.client;
+      final response = await client.from('chat_messages').insert({
+        'sender_username': message.senderUsername,
+        'recipient_username': message.recipientUsername,
+        'content': message.content,
+        'is_read': message.isRead,
+      }).select() as List<dynamic>;
+
+      if (response.isNotEmpty) {
+        final inserted = ChatMessage.fromMap(Map<String, dynamic>.from(response.first as Map));
+        if (mounted) {
+          setState(() {
+            message.id = inserted.id;
+            message.createdAt = inserted.createdAt;
+            message.isRead = inserted.isRead;
+          });
+        }
+      }
+    } catch (error) {
+      print('Failed to send chat message to Supabase: $error');
+      if (mounted) {
+        setState(() {
+          _supabaseConnected = false;
+          _debugStatus = 'Message send failed: $error';
+        });
+      }
+    }
+  }
+
+  List<ChatMessage> _parseChatMessages(List<dynamic> rows) {
+    return rows.map((row) {
+      final data = Map<String, dynamic>.from(row as Map);
+      return ChatMessage.fromMap(data);
+    }).toList();
+  }
+
+  List<ChatMessage> get _sortedChatMessages {
+    final messages = List<ChatMessage>.from(_chatMessages);
+    messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    return messages;
+  }
+
+  List<ChatMessage> _messagesBetween(String first, String second) {
+    final lowerFirst = first.toLowerCase();
+    final lowerSecond = second.toLowerCase();
+    return _sortedChatMessages.where((message) {
+      final sender = message.senderUsername.toLowerCase();
+      final recipient = message.recipientUsername.toLowerCase();
+      return (sender == lowerFirst && recipient == lowerSecond) ||
+          (sender == lowerSecond && recipient == lowerFirst);
+    }).toList();
+  }
+
+  Future<void> _markMessagesRead(String viewerUsername, String peerUsername) async {
+    if (!_shouldUseSupabase()) {
+      setState(() {
+        for (final message in _chatMessages) {
+          if (message.recipientUsername.toLowerCase() == viewerUsername.toLowerCase() &&
+              message.senderUsername.toLowerCase() == peerUsername.toLowerCase()) {
+            message.isRead = true;
+          }
+        }
+        _chatMessagesNotifier.value = List<ChatMessage>.unmodifiable(_chatMessages);
+      });
+      return;
+    }
+
+    try {
+      final connected = await _initializeSupabase();
+      if (!connected) {
+        return;
+      }
+
+      final client = Supabase.instance.client;
+      await client
+          .from('chat_messages')
+          .update({'is_read': true})
+          .eq('recipient_username', viewerUsername)
+          .eq('sender_username', peerUsername)
+          .eq('is_read', false);
+
+      if (mounted) {
+        setState(() {
+          for (final message in _chatMessages) {
+            if (message.recipientUsername.toLowerCase() == viewerUsername.toLowerCase() &&
+                message.senderUsername.toLowerCase() == peerUsername.toLowerCase()) {
+              message.isRead = true;
+            }
+          }
+        });
+      }
+    } catch (error) {
+      print('Failed to mark chat messages as read: $error');
+    }
+  }
+
+  void _openChat(BuildContext context, String peerUsername) {
+    if (_currentUser == null) {
+      return;
+    }
+
+    final currentUser = _currentUser!;
+    final conversation = _messagesBetween(currentUser.username, peerUsername);
+
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (context) {
+        return ChatPage(
+          currentUser: currentUser,
+          peerUsername: peerUsername,
+          initialMessages: conversation,
+          chatMessagesNotifier: _chatMessagesNotifier,
+          onSendMessage: (content) async {
+            await _sendChatMessage(
+              senderUsername: currentUser.username,
+              recipientUsername: peerUsername,
+              content: content,
+            );
+          },
+          onChatOpened: () async {
+            await _markMessagesRead(currentUser.username, peerUsername);
+            await _loadChatMessages();
+          },
+        );
+      },
+    ));
+  }
+
+  void _disposeChatChannel() {
+    _chatChannel?.unsubscribe();
+    _chatChannel = null;
+  }
+
+  @override
+  void dispose() {
+    _disposeChatChannel();
+    super.dispose();
   }
 
   List<UserAccount> _parseUsers(List<dynamic> rows) {
@@ -589,6 +851,8 @@ class _MyAppState extends State<MyApp> {
                   onRentEntryAdded: _addRentEntry,
                   onRentEntrySaved: _handleRentEntrySaved,
                   onMonthlyExpenseSaved: _handleMonthlyExpenseSaved,
+                  chatMessages: _chatMessages,
+                  onOpenChat: (context, peerUsername) => _openChat(context, peerUsername),
                 )
               : RoommateHome(
                   currentUser: _currentUser!,
@@ -597,6 +861,8 @@ class _MyAppState extends State<MyApp> {
                   members: _members,
                   notifications: _notifications,
                   rentEntries: _roommateRentEntries,
+                  chatMessages: _chatMessages,
+                  onOpenChat: (context, peerUsername) => _openChat(context, peerUsername),
                 ))
           : LoginPage(
               onLogin: _login,
@@ -854,6 +1120,57 @@ class RoommateRentEntry {
   final double totalAmount;
 }
 
+class ChatMessage {
+  ChatMessage({
+    this.id,
+    required this.senderUsername,
+    required this.recipientUsername,
+    required this.content,
+    required this.createdAt,
+    this.isRead = false,
+  });
+
+  int? id;
+  final String senderUsername;
+  final String recipientUsername;
+  final String content;
+  DateTime createdAt;
+  bool isRead;
+
+  factory ChatMessage.fromMap(Map<String, dynamic> data) {
+    final createdAtValue = data['created_at'];
+    DateTime createdAt;
+
+    if (createdAtValue is String) {
+      createdAt = DateTime.tryParse(createdAtValue) ?? DateTime.now().toUtc();
+    } else if (createdAtValue is DateTime) {
+      createdAt = createdAtValue.toUtc();
+    } else {
+      createdAt = DateTime.now().toUtc();
+    }
+
+    return ChatMessage(
+      id: data['id'] as int?,
+      senderUsername: data['sender_username']?.toString() ?? '',
+      recipientUsername: data['recipient_username']?.toString() ?? '',
+      content: data['content']?.toString() ?? '',
+      createdAt: createdAt,
+      isRead: data['is_read'] == true,
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return {
+      if (id != null) 'id': id,
+      'sender_username': senderUsername,
+      'recipient_username': recipientUsername,
+      'content': content,
+      'created_at': createdAt.toUtc().toIso8601String(),
+      'is_read': isRead,
+    };
+  }
+}
+
 class TaskManagementHome extends StatefulWidget {
   const TaskManagementHome({
     super.key,
@@ -871,6 +1188,8 @@ class TaskManagementHome extends StatefulWidget {
     required this.onRentEntryAdded,
     required this.onRentEntrySaved,
     required this.onMonthlyExpenseSaved,
+    required this.chatMessages,
+    required this.onOpenChat,
   });
 
   final UserAccount currentUser;
@@ -887,6 +1206,8 @@ class TaskManagementHome extends StatefulWidget {
   final ValueChanged<RoommateRentEntry> onRentEntryAdded;
   final ValueChanged<RentEntry> onRentEntrySaved;
   final ValueChanged<MonthlyExpenseEntry> onMonthlyExpenseSaved;
+  final List<ChatMessage> chatMessages;
+  final void Function(BuildContext context, String peerUsername) onOpenChat;
 
   @override
   State<TaskManagementHome> createState() => _TaskManagementHomeState();
@@ -1526,6 +1847,8 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
             const SizedBox(height: 20),
             if (_selectedAdminTab == 'Dashboard')
               _buildDashboardContent(theme)
+            else if (_selectedAdminTab == 'Chat')
+              _buildChatContent(theme)
             else if (_selectedAdminTab == 'Rent Collection')
               _buildRentCollectionContent(theme)
             else if (_selectedAdminTab == 'Monthly Expenses')
@@ -1574,6 +1897,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
             ...[
               _buildDrawerOption(theme, Icons.dashboard_outlined, 'Dashboard', 'Dashboard'),
               _buildDrawerOption(theme, Icons.people_outline, 'Roommates', 'User Management'),
+              _buildDrawerOption(theme, Icons.chat_bubble_outline, 'Chat', 'Chat'),
               _buildDrawerOption(theme, Icons.attach_money, 'Rent', 'Rent Collection'),
               _buildDrawerOption(theme, Icons.receipt_long_outlined, 'Expenses', 'Monthly Expenses'),
             ],
@@ -1602,6 +1926,51 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
         setState(() => _selectedAdminTab = tabName);
         Navigator.of(context).pop();
       },
+    );
+  }
+
+  Widget _buildChatContent(ThemeData theme) {
+    final roommates = widget.users.where((user) => user.role == 'roommate').toList();
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Admin Chat', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 10),
+            Text(
+              'Chat with roommates directly from the admin panel.',
+              style: theme.textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 16),
+            if (roommates.isEmpty)
+              Text('No roommates are available for chat.', style: theme.textTheme.bodyMedium)
+            else
+              ...roommates.map((user) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          user.username.capitalize(),
+                          style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      FilledButton.icon(
+                        onPressed: () => widget.onOpenChat(context, user.username),
+                        icon: const Icon(Icons.chat_bubble_outline),
+                        label: const Text('Chat'),
+                      ),
+                    ],
+                  ),
+                );
+              }).toList(),
+          ],
+        ),
+      ),
     );
   }
 
@@ -2216,6 +2585,12 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                         ],
                       ),
                       const SizedBox(height: 8),
+                      FilledButton.icon(
+                        onPressed: () => widget.onOpenChat(context, user.username),
+                        icon: const Icon(Icons.chat_bubble_outline),
+                        label: Text('Chat with ${user.username.capitalize()}'),
+                      ),
+                      const SizedBox(height: 12),
                       Text('Assigned tasks', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
                       const SizedBox(height: 6),
                       if (assignedTasks.isEmpty)
@@ -2445,6 +2820,8 @@ class RoommateHome extends StatefulWidget {
     required this.members,
     required this.notifications,
     required this.rentEntries,
+    required this.chatMessages,
+    required this.onOpenChat,
   });
 
   final UserAccount currentUser;
@@ -2453,6 +2830,8 @@ class RoommateHome extends StatefulWidget {
   final List<FlatMember> members;
   final List<AppNotification> notifications;
   final List<RoommateRentEntry> rentEntries;
+  final List<ChatMessage> chatMessages;
+  final void Function(BuildContext context, String peerUsername) onOpenChat;
 
   @override
   State<RoommateHome> createState() => _RoommateHomeState();
@@ -2569,6 +2948,27 @@ class _RoommateHomeState extends State<RoommateHome> {
                     Text(
                       'Hello ${widget.currentUser.username.capitalize()}, here are the tasks assigned to you.',
                       style: theme.textTheme.bodyMedium,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Chat with admin',
+                        style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                    FilledButton.icon(
+                      onPressed: () => widget.onOpenChat(context, 'admin'),
+                      icon: const Icon(Icons.chat),
+                      label: const Text('Open chat'),
                     ),
                   ],
                 ),
@@ -2758,6 +3158,172 @@ class _RoommateHomeState extends State<RoommateHome> {
         ),
       ),
     );
+  }
+}
+
+class ChatPage extends StatefulWidget {
+  const ChatPage({
+    super.key,
+    required this.currentUser,
+    required this.peerUsername,
+    required this.initialMessages,
+    required this.chatMessagesNotifier,
+    required this.onSendMessage,
+    required this.onChatOpened,
+  });
+
+  final UserAccount currentUser;
+  final String peerUsername;
+  final List<ChatMessage> initialMessages;
+  final ValueNotifier<List<ChatMessage>> chatMessagesNotifier;
+  final Future<void> Function(String content) onSendMessage;
+  final Future<void> Function() onChatOpened;
+
+  @override
+  State<ChatPage> createState() => _ChatPageState();
+}
+
+class _ChatPageState extends State<ChatPage> {
+  final TextEditingController _messageController = TextEditingController();
+  late List<ChatMessage> _messages;
+  late final VoidCallback _notifierListener;
+
+  @override
+  void initState() {
+    super.initState();
+    _messages = List<ChatMessage>.from(widget.initialMessages);
+    widget.onChatOpened();
+    _notifierListener = () {
+      setState(() {
+        _messages = widget.chatMessagesNotifier.value
+            .where((message) {
+              final sender = message.senderUsername.toLowerCase();
+              final recipient = message.recipientUsername.toLowerCase();
+              final current = widget.currentUser.username.toLowerCase();
+              final peer = widget.peerUsername.toLowerCase();
+              return (sender == current && recipient == peer) ||
+                  (sender == peer && recipient == current);
+            })
+            .toList();
+      });
+    };
+    widget.chatMessagesNotifier.addListener(_notifierListener);
+  }
+
+  @override
+  void dispose() {
+    widget.chatMessagesNotifier.removeListener(_notifierListener);
+    _messageController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _sendMessage() async {
+    final content = _messageController.text.trim();
+    if (content.isEmpty) {
+      return;
+    }
+
+    await widget.onSendMessage(content);
+    setState(() {
+      _messages.add(ChatMessage(
+        senderUsername: widget.currentUser.username,
+        recipientUsername: widget.peerUsername,
+        content: content,
+        createdAt: DateTime.now().toUtc(),
+      ));
+      _messageController.clear();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Chat with ${widget.peerUsername.capitalize()}'),
+        backgroundColor: theme.colorScheme.primary,
+        foregroundColor: theme.colorScheme.onPrimary,
+      ),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: ListView.builder(
+                padding: const EdgeInsets.all(16),
+                itemCount: _messages.length,
+                itemBuilder: (context, index) {
+                  final message = _messages[index];
+                  final isMe = message.senderUsername.toLowerCase() == widget.currentUser.username.toLowerCase();
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 420),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+                        decoration: BoxDecoration(
+                          color: isMe ? theme.colorScheme.primary : theme.colorScheme.surfaceVariant,
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              message.content,
+                              style: theme.textTheme.bodyLarge?.copyWith(
+                                color: isMe ? theme.colorScheme.onPrimary : theme.colorScheme.onSurface,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              '${message.senderUsername.capitalize()} · ${_formatTime(message.createdAt)}',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: isMe ? theme.colorScheme.onPrimary.withOpacity(0.75) : theme.colorScheme.onSurface.withOpacity(0.75),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _messageController,
+                      decoration: const InputDecoration(
+                        hintText: 'Type your message...',
+                        border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(16))),
+                        contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                      ),
+                      onSubmitted: (_) => _sendMessage(),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  FilledButton(
+                    onPressed: _sendMessage,
+                    child: const Icon(Icons.send),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _formatTime(DateTime dateTime) {
+    final local = dateTime.toLocal();
+    final hour = local.hour.toString().padLeft(2, '0');
+    final minute = local.minute.toString().padLeft(2, '0');
+    return '$hour:$minute';
   }
 }
 
