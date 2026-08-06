@@ -1424,6 +1424,12 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
     widget.onMonthlyExpenseSaved(expenseEntry);
   }
 
+  void _removeMonthlyExpense(MonthlyExpenseEntry entry) {
+    setState(() {
+      _monthlyExpenseEntries.remove(entry);
+    });
+  }
+
   void _setSupabaseStatus(String message, {required bool connected}) {
     print('Supabase status: $message');
     if (!mounted) {
@@ -2529,7 +2535,17 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                         ],
                       ),
                     ),
-                    Text('₹${entry.amount.toStringAsFixed(0)}', style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w700)),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text('₹${entry.amount.toStringAsFixed(0)}', style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w700)),
+                        IconButton(
+                          onPressed: () => _removeMonthlyExpense(entry),
+                          icon: const Icon(Icons.delete_outline),
+                          tooltip: 'Remove expense',
+                        ),
+                      ],
+                    ),
                   ],
                 ),
               ),
