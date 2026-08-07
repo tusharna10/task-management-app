@@ -448,12 +448,18 @@ class _MyAppState extends State<MyApp> {
         throw Exception('Supabase not initialized');
       }
       final client = Supabase.instance.client;
-      await client.from('monthly_expenses').insert({
+      final response = await client.from('monthly_expenses').insert({
         'title': entry.title,
         'amount': entry.amount,
         'category': entry.category,
         'month_label': entry.monthLabel,
-      });
+      }).select() as List<dynamic>;
+
+      if (response.isNotEmpty) {
+        final row = Map<String, dynamic>.from(response.first as Map);
+        entry.id = row['id'] as int?;
+      }
+
       _setSupabaseStatus('Saved monthly expense to Supabase', connected: true);
     } catch (error) {
       print('Failed to save monthly expense to Supabase: $error');
@@ -760,6 +766,7 @@ class _MyAppState extends State<MyApp> {
     return rows.map((row) {
       final data = Map<String, dynamic>.from(row as Map);
       return MonthlyExpenseEntry(
+        id: data['id'] as int?,
         title: data['title']?.toString() ?? '',
         amount: double.tryParse(data['amount']?.toString() ?? '0') ?? 0,
         category: data['category']?.toString() ?? 'Other',
@@ -1096,8 +1103,9 @@ class RentEntry {
 }
 
 class MonthlyExpenseEntry {
-  MonthlyExpenseEntry({required this.title, required this.amount, required this.category, required this.monthLabel});
+  MonthlyExpenseEntry({this.id, required this.title, required this.amount, required this.category, required this.monthLabel});
 
+  int? id;
   final String title;
   final double amount;
   final String category;
@@ -1424,10 +1432,40 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
     widget.onMonthlyExpenseSaved(expenseEntry);
   }
 
-  void _removeMonthlyExpense(MonthlyExpenseEntry entry) {
+  Future<void> _removeMonthlyExpense(MonthlyExpenseEntry entry) async {
+    // Remove locally first for immediate feedback
     setState(() {
       _monthlyExpenseEntries.remove(entry);
     });
+
+    if (!_shouldUseSupabase()) {
+      return;
+    }
+
+    try {
+      final connected = await _initializeSupabase();
+      if (!connected) {
+        return;
+      }
+
+      final client = Supabase.instance.client;
+
+      if (entry.id != null) {
+        await client.from('monthly_expenses').delete().eq('id', entry.id);
+      } else {
+        // Fallback: try to delete by matching fields
+        await client.from('monthly_expenses').delete().match({
+          'title': entry.title,
+          'month_label': entry.monthLabel,
+          'amount': entry.amount,
+        });
+      }
+
+      _setSupabaseStatus('Deleted monthly expense from Supabase', connected: true);
+    } catch (error) {
+      print('Failed to delete monthly expense from Supabase: $error');
+      _setSupabaseStatus('Failed to delete monthly expense: $error', connected: false);
+    }
   }
 
   void _setSupabaseStatus(String message, {required bool connected}) {
