@@ -1218,22 +1218,14 @@ class _LoginPageState extends State<LoginPage> {
                           child: const Text('Login'),
                         ),
                       ),
-                       const SizedBox(height: 12),
-                       Center(
-                         child: Text(
-                           'Use admin / 1234 or any created roommate account.',
-                           style: theme.textTheme.bodySmall?.copyWith(color: Colors.black54),
-                           textAlign: TextAlign.center,
-                         ),
-                       ),
-                       const SizedBox(height: 16),
-                       Center(
-                         child: Text(
-                           'Copyright © 2026 Tushar Narkhede. All rights reserved.',
-                           style: theme.textTheme.bodySmall?.copyWith(color: Colors.black38),
-                           textAlign: TextAlign.center,
-                         ),
-                       ),
+                        const SizedBox(height: 12),
+                        Center(
+                          child: Text(
+                            'Use admin / 1234 or any created roommate account.',
+                            style: theme.textTheme.bodySmall?.copyWith(color: Colors.black54),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -2147,6 +2139,13 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
               child: Text(
                 'Navigate to manage tasks, rent sharing, and monthly costs with a clean workspace.',
                 style: theme.textTheme.bodySmall?.copyWith(color: Colors.black54),
+              ),
+            ),
+            Center(
+              child: Text(
+                'Copyright © 2026 Tushar Narkhede. All rights reserved.',
+                style: theme.textTheme.bodySmall?.copyWith(color: Colors.black38),
+                textAlign: TextAlign.center,
               ),
             ),
           ],
