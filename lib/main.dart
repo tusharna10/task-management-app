@@ -1413,7 +1413,7 @@ class TaskManagementHome extends StatefulWidget {
 class _TaskManagementHomeState extends State<TaskManagementHome> {
   String _selectedFilter = 'All';
   String _selectedAdminTab = 'Dashboard';
-  final TextEditingController _totalRentController = TextEditingController(text: '12000');
+  final TextEditingController _totalRentController = TextEditingController(text: '14000');
   String _selectedRentMonth = '';
   final List<String> _selectedRentMembers = [];
   final Map<String, TextEditingController> _rentControllersByMember = {};
