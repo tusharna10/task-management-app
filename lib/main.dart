@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 const _supabaseUrl = 'https://pqroottrlhgkpcglnagf.supabase.co';
@@ -7,23 +8,17 @@ const _supabaseAnonKey = 'sb_publishable_YAOAdadWVWczdtAIlty1tw_N8lpHv52';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  if (!_shouldUseSupabase()) {
-    runApp(const MyApp());
-    return;
-  }
-
-  try {
-    await Supabase.initialize(url: _supabaseUrl, publishableKey: _supabaseAnonKey);
-  } catch (_) {
-    // Continue with the local app experience if Supabase is unavailable.
-  }
-
   runApp(const MyApp());
 }
 
+bool _testMode = false;
+
+void setTestMode(bool value) {
+  _testMode = value;
+}
+
 bool _shouldUseSupabase() {
-  return true;
+  return !_testMode;
 }
 
 class MyApp extends StatefulWidget {
@@ -56,6 +51,7 @@ class _MyAppState extends State<MyApp> {
   bool _supabaseInitialized = false;
   bool _supabaseConnected = false;
   RealtimeChannel? _chatChannel;
+  RealtimeChannel? _taskChannel;
   int _debugUsersCount = 0;
   int _debugTasksCount = 0;
   int _debugMembersCount = 0;
@@ -102,6 +98,9 @@ class _MyAppState extends State<MyApp> {
       FlatMember(name: 'Nimal', role: 'Roommate'),
     ];
     _notifications = [];
+    if (_testMode) {
+      _loadDemoData();
+    }
     () async {
       await _loadRemoteData();
       await _ensureDefaultAdminUser();
@@ -265,6 +264,7 @@ class _MyAppState extends State<MyApp> {
       _supabaseConnected = true;
       _setSupabaseStatus('Supabase connected', connected: true);
       _subscribeToChatUpdates();
+      _subscribeToTaskUpdates();
       return true;
     } catch (error) {
       _supabaseInitialized = true;
@@ -326,11 +326,44 @@ class _MyAppState extends State<MyApp> {
       print('Supabase load failed: $error');
       if (mounted) {
         setState(() {
-          _debugStatus = 'Load failed: $error';
+          _debugStatus = 'Offline demo mode';
           _supabaseConnected = false;
+          _loadDemoData();
         });
       }
     }
+  }
+
+  void _loadDemoData() {
+    _users
+      ..clear()
+      ..addAll([
+        UserAccount(username: 'admin', password: 'admin123', role: 'admin'),
+        UserAccount(username: 'rahul', password: 'rahul123', role: 'roommate'),
+        UserAccount(username: 'priya', password: 'priya123', role: 'roommate'),
+      ]);
+    _tasks
+      ..clear()
+      ..addAll([
+        Task(title: 'Clean kitchen', category: 'Cleaning', priority: 'High', assignedTo: 'rahul', status: 'Planned'),
+        Task(title: 'Pay electricity bill', category: 'Bills', priority: 'High', assignedTo: 'priya', status: 'Planned'),
+        Task(title: 'Buy groceries', category: 'Shopping', priority: 'Medium', assignedTo: 'rahul', status: 'Started'),
+      ]);
+    _members
+      ..clear()
+      ..addAll([
+        FlatMember(name: 'Rahul', role: 'Roommate'),
+        FlatMember(name: 'Priya', role: 'Roommate'),
+      ]);
+    _savedRentEntries.clear();
+    _monthlyExpenses
+      ..clear()
+      ..addAll([
+        MonthlyExpenseEntry(title: 'Electricity', amount: 1500, category: 'Bills', monthLabel: '2026-08'),
+        MonthlyExpenseEntry(title: 'Internet', amount: 999, category: 'Bills', monthLabel: '2026-08'),
+      ]);
+    _chatMessages.clear();
+    _rebuildRoommateRentEntries();
   }
 
   Future<void> _createUser(String username, String password) async {
@@ -453,6 +486,7 @@ class _MyAppState extends State<MyApp> {
         'amount': entry.amount,
         'category': entry.category,
         'month_label': entry.monthLabel,
+        'deleted': entry.deleted,
       }).select() as List<dynamic>;
 
       if (response.isNotEmpty) {
@@ -505,6 +539,93 @@ class _MyAppState extends State<MyApp> {
     }
   }
 
+  Future<bool> _verifyStorageBucket(String bucketId) async {
+    if (!_shouldUseSupabase()) {
+      return false;
+    }
+
+    try {
+      final connected = await _initializeSupabase();
+      if (!connected) {
+        return false;
+      }
+
+      final client = Supabase.instance.client;
+      await client.storage.from(bucketId).list();
+      final exists = true;
+      print('Storage bucket "$bucketId" exists: $exists');
+      return exists;
+    } catch (e) {
+      print('Storage bucket "$bucketId" check failed: $e');
+      return false;
+    }
+  }
+
+  Future<String?> _uploadTaskImage(Task task, XFile imageFile) async {
+    if (!_shouldUseSupabase()) {
+      return null;
+    }
+
+    try {
+      final connected = await _initializeSupabase();
+      if (!connected) {
+        return 'Not connected to Supabase';
+      }
+
+      final bucketExists = await _verifyStorageBucket('task-images');
+      if (!bucketExists) {
+        return 'Storage bucket "task-images" not found. Create it in Supabase Dashboard > Storage.';
+      }
+
+      final bytes = await imageFile.readAsBytes();
+      final fileName = 'task_${task.id ?? DateTime.now().millisecondsSinceEpoch}_${imageFile.name}';
+      await Supabase.instance.client.storage
+          .from('task-images')
+          .uploadBinary(fileName, bytes, fileOptions: const FileOptions(upsert: true));
+      final publicUrl = Supabase.instance.client.storage
+          .from('task-images')
+          .getPublicUrl(fileName);
+
+      setState(() {
+        task.imageUrl = publicUrl;
+      });
+
+      if (task.id != null) {
+        await _updateTaskInSupabase(task);
+      }
+
+      return null;
+    } catch (e) {
+      return 'Image upload failed: $e';
+    }
+  }
+
+  Future<void> _updateTaskInSupabase(Task task) async {
+    if (!_shouldUseSupabase() || task.id == null) {
+      return;
+    }
+
+    try {
+      final connected = await _initializeSupabase();
+      if (!connected) {
+        return;
+      }
+
+      final client = Supabase.instance.client;
+      await client.from('tasks').update({
+        'title': task.title,
+        'category': task.category,
+        'priority': task.priority,
+        'assigned_to': task.assignedTo,
+        'completed': task.completed,
+        'status': task.status,
+        'image_url': task.imageUrl,
+      }).eq('id', task.id!);
+    } catch (e) {
+      print('Failed to update task in Supabase: $e');
+    }
+  }
+
   void _subscribeToChatUpdates() {
     if (!_shouldUseSupabase()) {
       return;
@@ -534,20 +655,44 @@ class _MyAppState extends State<MyApp> {
     }
   }
 
-  Future<void> _sendChatMessage({
+  Future<String?> _sendChatMessage({
     required String senderUsername,
     required String recipientUsername,
     required String content,
+    XFile? imageFile,
   }) async {
     final trimmedContent = content.trim();
-    if (trimmedContent.isEmpty) {
-      return;
+    if (trimmedContent.isEmpty && imageFile == null) {
+      return null;
+    }
+
+    String? uploadedImageUrl;
+
+    if (imageFile != null) {
+      try {
+        final bucketExists = await _verifyStorageBucket('chat-images');
+        if (!bucketExists) {
+          return 'Storage bucket "chat-images" not found. Create it in Supabase Dashboard > Storage.';
+        }
+
+        final bytes = await imageFile.readAsBytes();
+        final fileName = '${DateTime.now().millisecondsSinceEpoch}_${imageFile.name}';
+        await Supabase.instance.client.storage
+            .from('chat-images')
+            .uploadBinary(fileName, bytes, fileOptions: const FileOptions(upsert: true));
+        uploadedImageUrl = Supabase.instance.client.storage
+            .from('chat-images')
+            .getPublicUrl(fileName);
+      } catch (e) {
+        return 'Image upload failed: $e';
+      }
     }
 
     final message = ChatMessage(
       senderUsername: senderUsername,
       recipientUsername: recipientUsername,
       content: trimmedContent,
+      imageUrl: uploadedImageUrl,
       createdAt: DateTime.now().toUtc(),
       isRead: false,
     );
@@ -558,13 +703,13 @@ class _MyAppState extends State<MyApp> {
     });
 
     if (!_shouldUseSupabase()) {
-      return;
+      return null;
     }
 
     try {
       final connected = await _initializeSupabase();
       if (!connected) {
-        return;
+        return 'Not connected to Supabase';
       }
 
       final client = Supabase.instance.client;
@@ -572,6 +717,7 @@ class _MyAppState extends State<MyApp> {
         'sender_username': message.senderUsername,
         'recipient_username': message.recipientUsername,
         'content': message.content,
+        if (message.imageUrl != null) 'image_url': message.imageUrl,
         'is_read': message.isRead,
       }).select() as List<dynamic>;
 
@@ -585,14 +731,9 @@ class _MyAppState extends State<MyApp> {
           });
         }
       }
+      return null;
     } catch (error) {
-      print('Failed to send chat message to Supabase: $error');
-      if (mounted) {
-        setState(() {
-          _supabaseConnected = false;
-          _debugStatus = 'Message send failed: $error';
-        });
-      }
+      return 'Failed to send message: $error';
     }
   }
 
@@ -678,12 +819,14 @@ class _MyAppState extends State<MyApp> {
           peerUsername: peerUsername,
           initialMessages: conversation,
           chatMessagesNotifier: _chatMessagesNotifier,
-          onSendMessage: (content) async {
-            await _sendChatMessage(
+          onSendMessage: (content, {XFile? imageFile}) async {
+            final error = await _sendChatMessage(
               senderUsername: currentUser.username,
               recipientUsername: peerUsername,
               content: content,
+              imageFile: imageFile,
             );
+            return error;
           },
           onChatOpened: () async {
             await _markMessagesRead(currentUser.username, peerUsername);
@@ -694,6 +837,40 @@ class _MyAppState extends State<MyApp> {
     ));
   }
 
+  void _subscribeToTaskUpdates() {
+    if (!_shouldUseSupabase()) {
+      return;
+    }
+
+    try {
+      final client = Supabase.instance.client;
+      _taskChannel?.unsubscribe();
+      _taskChannel = client
+          .channel('tasks')
+          .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'tasks',
+            callback: (payload) async {
+              await _loadRemoteData();
+            },
+          )
+          .subscribe((status, [error]) {
+            if (status == RealtimeSubscribeStatus.channelError ||
+                status == RealtimeSubscribeStatus.timedOut) {
+              print('Task subscription issue: $status $error');
+            }
+          });
+    } catch (error) {
+      print('Failed to subscribe to task updates: $error');
+    }
+  }
+
+  void _disposeTaskChannel() {
+    _taskChannel?.unsubscribe();
+    _taskChannel = null;
+  }
+
   void _disposeChatChannel() {
     _chatChannel?.unsubscribe();
     _chatChannel = null;
@@ -702,6 +879,7 @@ class _MyAppState extends State<MyApp> {
   @override
   void dispose() {
     _disposeChatChannel();
+    _disposeTaskChannel();
     super.dispose();
   }
 
@@ -728,6 +906,7 @@ class _MyAppState extends State<MyApp> {
         assignedTo: data['assigned_to']?.toString(),
         completed: data['completed'] == true,
         status: data['status']?.toString() ?? 'Planned',
+        imageUrl: data['image_url'] as String?,
       );
     }).toList();
   }
@@ -763,7 +942,7 @@ class _MyAppState extends State<MyApp> {
   }
 
   List<MonthlyExpenseEntry> _parseMonthlyExpenses(List<dynamic> rows) {
-    return rows.map((row) {
+    final all = rows.map((row) {
       final data = Map<String, dynamic>.from(row as Map);
       return MonthlyExpenseEntry(
         id: data['id'] as int?,
@@ -771,8 +950,10 @@ class _MyAppState extends State<MyApp> {
         amount: double.tryParse(data['amount']?.toString() ?? '0') ?? 0,
         category: data['category']?.toString() ?? 'Other',
         monthLabel: data['month_label']?.toString() ?? '',
+        deleted: data['deleted'] == true,
       );
     }).toList();
+    return all.where((entry) => !entry.deleted).toList();
   }
 
   String _formatMemberName(String value) {
@@ -870,6 +1051,7 @@ class _MyAppState extends State<MyApp> {
                   rentEntries: _roommateRentEntries,
                   chatMessages: _chatMessages,
                   onOpenChat: (context, peerUsername) => _openChat(context, peerUsername),
+                  onTaskImageUpdated: (task, imageFile) => _uploadTaskImage(task, imageFile),
                 ))
           : LoginPage(
               onLogin: _login,
@@ -1074,6 +1256,7 @@ class Task {
     this.assignedTo,
     this.completed = false,
     this.status = 'Planned',
+    this.imageUrl,
   });
 
   int? id;
@@ -1083,6 +1266,7 @@ class Task {
   final String? assignedTo;
   bool completed;
   String status;
+  String? imageUrl;
 }
 
 class FlatMember {
@@ -1103,13 +1287,14 @@ class RentEntry {
 }
 
 class MonthlyExpenseEntry {
-  MonthlyExpenseEntry({this.id, required this.title, required this.amount, required this.category, required this.monthLabel});
+  MonthlyExpenseEntry({this.id, required this.title, required this.amount, required this.category, required this.monthLabel, this.deleted = false});
 
   int? id;
   final String title;
   final double amount;
   final String category;
   final String monthLabel;
+  bool deleted;
 }
 
 class RoommateRentEntry {
@@ -1134,6 +1319,7 @@ class ChatMessage {
     required this.senderUsername,
     required this.recipientUsername,
     required this.content,
+    this.imageUrl,
     required this.createdAt,
     this.isRead = false,
   });
@@ -1142,6 +1328,7 @@ class ChatMessage {
   final String senderUsername;
   final String recipientUsername;
   final String content;
+  final String? imageUrl;
   DateTime createdAt;
   bool isRead;
 
@@ -1162,6 +1349,7 @@ class ChatMessage {
       senderUsername: data['sender_username']?.toString() ?? '',
       recipientUsername: data['recipient_username']?.toString() ?? '',
       content: data['content']?.toString() ?? '',
+      imageUrl: data['image_url'] as String?,
       createdAt: createdAt,
       isRead: data['is_read'] == true,
     );
@@ -1173,6 +1361,7 @@ class ChatMessage {
       'sender_username': senderUsername,
       'recipient_username': recipientUsername,
       'content': content,
+      if (imageUrl != null) 'image_url': imageUrl,
       'created_at': createdAt.toUtc().toIso8601String(),
       'is_read': isRead,
     };
@@ -1231,6 +1420,8 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
   final Map<String, String> _rentValuesByMember = {};
   final List<RentEntry> _savedRentEntries = [];
   final List<MonthlyExpenseEntry> _monthlyExpenseEntries = [];
+  final Set<String> _distributedMembers = {};
+  final Set<String> _receivedMembers = {};
   final TextEditingController _expenseTitleController = TextEditingController();
   final TextEditingController _expenseAmountController = TextEditingController();
   String _selectedExpenseMonth = '';
@@ -1433,9 +1624,9 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
   }
 
   Future<void> _removeMonthlyExpense(MonthlyExpenseEntry entry) async {
-    // Remove locally first for immediate feedback
+    // Soft delete locally first for immediate feedback
     setState(() {
-      _monthlyExpenseEntries.remove(entry);
+      entry.deleted = true;
     });
 
     if (!_shouldUseSupabase()) {
@@ -1443,28 +1634,29 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
     }
 
     try {
-      final connected = await _initializeSupabase();
-      if (!connected) {
-        return;
+      try {
+        await Supabase.initialize(url: _supabaseUrl, publishableKey: _supabaseAnonKey);
+      } catch (_) {
+        // ignore if already initialized
       }
 
       final client = Supabase.instance.client;
 
       if (entry.id != null) {
-        await client.from('monthly_expenses').delete().eq('id', entry.id);
+        await client.from('monthly_expenses').update({'deleted': true}).eq('id', entry.id!);
       } else {
-        // Fallback: try to delete by matching fields
-        await client.from('monthly_expenses').delete().match({
+        // Fallback: try to update by matching fields
+        await client.from('monthly_expenses').update({'deleted': true}).match({
           'title': entry.title,
           'month_label': entry.monthLabel,
           'amount': entry.amount,
         });
       }
 
-      _setSupabaseStatus('Deleted monthly expense from Supabase', connected: true);
+      _setSupabaseStatus('Soft deleted monthly expense from Supabase', connected: true);
     } catch (error) {
-      print('Failed to delete monthly expense from Supabase: $error');
-      _setSupabaseStatus('Failed to delete monthly expense: $error', connected: false);
+      print('Failed to soft delete monthly expense from Supabase: $error');
+      _setSupabaseStatus('Failed to soft delete monthly expense: $error', connected: false);
     }
   }
 
@@ -1498,6 +1690,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
           'assigned_to': task.assignedTo,
           'completed': task.completed,
           'status': task.status,
+          if (task.imageUrl != null) 'image_url': task.imageUrl,
         }).select();
         final rows = response as List<dynamic>;
         if (rows.isNotEmpty) {
@@ -1513,6 +1706,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
           'assigned_to': task.assignedTo,
           'completed': task.completed,
           'status': task.status,
+          if (task.imageUrl != null) 'image_url': task.imageUrl,
         }).eq('id', task.id!);
       }
       _setSupabaseStatus('Task synced to Supabase', connected: true);
@@ -1687,12 +1881,6 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
     await _syncTask(task, isNew: false);
   }
 
-  void _deleteTask(Task task) {
-    setState(() {
-      widget.tasks.remove(task);
-    });
-  }
-
   Future<void> _updateTaskStatus(Task task, String status) async {
     setState(() {
       task.status = status;
@@ -1862,7 +2050,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                 ),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.teal.shade200.withOpacity(0.4),
+                    color: Colors.teal.shade200.withValues(alpha: 0.4),
                     blurRadius: 24,
                     offset: const Offset(0, 10),
                   ),
@@ -2011,7 +2199,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                     ],
                   ),
                 );
-              }).toList(),
+              }),
           ],
         ),
       ),
@@ -2135,7 +2323,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                 ),
                 const SizedBox(height: 16),
                 DropdownButtonFormField<String>(
-                  value: _selectedRentMonth.isEmpty ? null : _selectedRentMonth,
+                  initialValue: _selectedRentMonth.isEmpty ? null : _selectedRentMonth,
                   decoration: const InputDecoration(
                     labelText: 'Month',
                     border: OutlineInputBorder(),
@@ -2278,12 +2466,12 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                     scrollDirection: Axis.horizontal,
                     child: DataTable(
                       columnSpacing: 16,
-                      columns: const [
-                        DataColumn(label: Text('Select')),
-                        DataColumn(label: Text('Roommate')),
-                        DataColumn(label: Text('Amount')),
-                        DataColumn(label: Text('Distribute')),
-                      ],
+                       columns: const [
+                         DataColumn(label: Text('Select')),
+                         DataColumn(label: Text('Roommate')),
+                         DataColumn(label: Text('Amount')),
+                         DataColumn(label: Text('Actions')),
+                       ],
                       rows: roommateMembers.map((member) {
                         final isSelected = _selectedRentMembers.contains(member.name);
                         final valueText = _rentValuesByMember[member.name] ?? splitAmount.toStringAsFixed(0);
@@ -2349,29 +2537,56 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                                 ),
                               ),
                             ),
-                            DataCell(
-                              FilledButton.tonal(
-                                onPressed: () {
-                                  setState(() {
-                                    final selectedMembers = _selectedRentMembers.isEmpty
-                                        ? <String>[member.name]
-                                        : _selectedRentMembers.toList();
-                                    if (!_selectedRentMembers.contains(member.name)) {
-                                      _selectedRentMembers.add(member.name);
-                                    }
-                                    final shareValue = _sharedCostTotal / selectedMembers.length;
-                                    final shareText = shareValue.toStringAsFixed(0);
-                                    for (final selectedName in selectedMembers) {
-                                      _ensureRentController(selectedName, shareText);
-                                      _rentControllersByMember[selectedName]!.text = shareText;
-                                      _rentValuesByMember[selectedName] = shareText;
-                                    }
-                                  });
-                                },
-                                child: const Text('Distribute'),
+                             DataCell(
+                               Row(
+                                 mainAxisSize: MainAxisSize.min,
+                                 children: [
+                                   FilledButton(
+                                     onPressed: () {
+                                       setState(() {
+                                         final selectedMembers = _selectedRentMembers.isEmpty
+                                             ? <String>[member.name]
+                                             : _selectedRentMembers.toList();
+                                         if (!_selectedRentMembers.contains(member.name)) {
+                                           _selectedRentMembers.add(member.name);
+                                         }
+                                         final shareValue = _sharedCostTotal / selectedMembers.length;
+                                         final shareText = shareValue.toStringAsFixed(0);
+                                         for (final selectedName in selectedMembers) {
+                                           _ensureRentController(selectedName, shareText);
+                                           _rentControllersByMember[selectedName]!.text = shareText;
+                                           _rentValuesByMember[selectedName] = shareText;
+                                         }
+                                         _distributedMembers.add(member.name);
+                                       });
+                                     },
+                                     style: FilledButton.styleFrom(
+                                       backgroundColor: _distributedMembers.contains(member.name)
+                                           ? Colors.green
+                                           : Colors.red,
+                                       foregroundColor: Colors.white,
+                                     ),
+                                     child: const Text('Distribute'),
+                                   ),
+                                   const SizedBox(width: 8),
+                                   FilledButton(
+                                     onPressed: () {
+                                       setState(() {
+                                         _receivedMembers.add(member.name);
+                                       });
+                                     },
+                                     style: FilledButton.styleFrom(
+                                       backgroundColor: _receivedMembers.contains(member.name)
+                                           ? Colors.green
+                                           : Colors.red,
+                                       foregroundColor: Colors.white,
+                                     ),
+                                     child: const Text('Received'),
+                                   ),
+                                 ],
+                               ),
                               ),
-                            ),
-                          ],
+                           ],
                         );
                       }).toList(),
                     ),
@@ -2416,7 +2631,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                           ),
                         ),
                       );
-                    }).toList(),
+                    }),
                   ],
                 ),
               ),
@@ -2447,7 +2662,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                 ),
                 const SizedBox(height: 16),
                 DropdownButtonFormField<String>(
-                  value: _selectedExpenseMonth.isEmpty ? null : _selectedExpenseMonth,
+                  initialValue: _selectedExpenseMonth.isEmpty ? null : _selectedExpenseMonth,
                   decoration: const InputDecoration(
                     labelText: 'Month',
                     border: OutlineInputBorder(),
@@ -2463,7 +2678,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                 ),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
-                  value: _selectedExpenseCategory,
+                  initialValue: _selectedExpenseCategory,
                   decoration: const InputDecoration(
                     labelText: 'Category',
                     border: OutlineInputBorder(),
@@ -2551,7 +2766,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
             ),
           )
         else
-          ..._monthlyExpenseEntries.reversed.map((entry) {
+          ..._monthlyExpenseEntries.reversed.where((entry) => !entry.deleted).map((entry) {
             return Card(
               margin: const EdgeInsets.only(bottom: 10),
               child: Padding(
@@ -2588,7 +2803,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                 ),
               ),
             );
-          }).toList(),
+          }),
       ],
     );
   }
@@ -2756,7 +2971,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                   ],
                 ),
               );
-            }).toList(),
+            }),
           ],
         ),
       ),
@@ -2843,20 +3058,38 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                                 ? Colors.orange.shade100
                                 : Colors.blue.shade100,
                       ),
+                      if (task.imageUrl != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: InkWell(
+                            onTap: () {
+                              showDialog(
+                                context: context,
+                                builder: (context) => Dialog(
+                                  child: InteractiveViewer(
+                                    child: Image.network(task.imageUrl!, fit: BoxFit.contain),
+                                  ),
+                                ),
+                              );
+                            },
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: Image.network(
+                                task.imageUrl!,
+                                width: 60,
+                                height: 60,
+                                fit: BoxFit.cover,
+                                errorBuilder: (context, error, stackTrace) {
+                                  return const Icon(Icons.broken_image, size: 40);
+                                },
+                              ),
+                            ),
+                          ),
+                        ),
                     ],
                   ),
                 ],
               ),
-            ),
-            const SizedBox(width: 8),
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.delete_outline),
-                  onPressed: () => _deleteTask(task),
-                ),
-              ],
             ),
           ],
         ),
@@ -2876,6 +3109,7 @@ class RoommateHome extends StatefulWidget {
     required this.rentEntries,
     required this.chatMessages,
     required this.onOpenChat,
+    required this.onTaskImageUpdated,
   });
 
   final UserAccount currentUser;
@@ -2886,6 +3120,7 @@ class RoommateHome extends StatefulWidget {
   final List<RoommateRentEntry> rentEntries;
   final List<ChatMessage> chatMessages;
   final void Function(BuildContext context, String peerUsername) onOpenChat;
+  final Future<String?> Function(Task task, XFile imageFile) onTaskImageUpdated;
 
   @override
   State<RoommateHome> createState() => _RoommateHomeState();
@@ -2913,7 +3148,7 @@ class _RoommateHomeState extends State<RoommateHome> {
         color: Colors.white,
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.06),
+            color: Colors.black.withValues(alpha: 0.06),
             blurRadius: 22,
             offset: const Offset(0, 12),
           ),
@@ -2965,6 +3200,21 @@ class _RoommateHomeState extends State<RoommateHome> {
       task.status = status;
       task.completed = status == 'Completed';
     });
+  }
+
+  Future<void> _pickTaskImage(Task task) async {
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(source: ImageSource.gallery, maxWidth: 800);
+    if (picked == null) {
+      return;
+    }
+
+    final error = await widget.onTaskImageUpdated(task, picked);
+    if (error != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error)),
+      );
+    }
   }
 
   @override
@@ -3139,7 +3389,7 @@ class _RoommateHomeState extends State<RoommateHome> {
                             ],
                           ),
                         );
-                      }).toList(),
+                      }),
                     ],
                   ),
                 ),
@@ -3177,6 +3427,15 @@ class _RoommateHomeState extends State<RoommateHome> {
                               FilledButton.tonal(
                                 onPressed: () => _updateTaskStatus(task, 'Started'),
                                 child: const Text('Pick up'),
+                              ),
+                            if (task.status == 'Completed')
+                              IconButton(
+                                icon: Icon(
+                                  task.imageUrl != null ? Icons.check_circle : Icons.image_outlined,
+                                  color: task.imageUrl != null ? Colors.green : theme.colorScheme.primary,
+                                ),
+                                tooltip: task.imageUrl != null ? 'Image attached' : 'Attach completion image',
+                                onPressed: () => _pickTaskImage(task),
                               ),
                           ],
                         ),
@@ -3230,7 +3489,7 @@ class ChatPage extends StatefulWidget {
   final String peerUsername;
   final List<ChatMessage> initialMessages;
   final ValueNotifier<List<ChatMessage>> chatMessagesNotifier;
-  final Future<void> Function(String content) onSendMessage;
+  final Future<String?> Function(String content, {XFile? imageFile}) onSendMessage;
   final Future<void> Function() onChatOpened;
 
   @override
@@ -3271,22 +3530,36 @@ class _ChatPageState extends State<ChatPage> {
     super.dispose();
   }
 
-  Future<void> _sendMessage() async {
+  Future<void> _sendMessage({XFile? imageFile}) async {
     final content = _messageController.text.trim();
-    if (content.isEmpty) {
+    if (content.isEmpty && imageFile == null) {
       return;
     }
 
-    await widget.onSendMessage(content);
+    final error = await widget.onSendMessage(content, imageFile: imageFile);
+    if (error != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error)),
+      );
+    }
     setState(() {
       _messages.add(ChatMessage(
         senderUsername: widget.currentUser.username,
         recipientUsername: widget.peerUsername,
         content: content,
+        imageUrl: imageFile != null ? 'local://${imageFile.path}' : null,
         createdAt: DateTime.now().toUtc(),
       ));
       _messageController.clear();
     });
+  }
+
+  Future<void> _pickImage() async {
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(source: ImageSource.gallery, maxWidth: 800);
+    if (picked != null) {
+      await _sendMessage(imageFile: picked);
+    }
   }
 
   @override
@@ -3316,23 +3589,51 @@ class _ChatPageState extends State<ChatPage> {
                       child: Container(
                         padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
                         decoration: BoxDecoration(
-                          color: isMe ? theme.colorScheme.primary : theme.colorScheme.surfaceVariant,
+                          color: isMe ? theme.colorScheme.primary : theme.colorScheme.surfaceContainerHighest,
                           borderRadius: BorderRadius.circular(18),
                         ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              message.content,
-                              style: theme.textTheme.bodyLarge?.copyWith(
-                                color: isMe ? theme.colorScheme.onPrimary : theme.colorScheme.onSurface,
+                            if (message.content.isNotEmpty)
+                              Text(
+                                message.content,
+                                style: theme.textTheme.bodyLarge?.copyWith(
+                                  color: isMe ? theme.colorScheme.onPrimary : theme.colorScheme.onSurface,
+                                ),
                               ),
-                            ),
+                            if (message.imageUrl != null) ...[
+                              if (message.content.isNotEmpty) const SizedBox(height: 8),
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: Image.network(
+                                  message.imageUrl!,
+                                  width: 220,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (context, error, stackTrace) {
+                                    return Text(
+                                      'Image unavailable',
+                                      style: theme.textTheme.bodySmall?.copyWith(
+                                        color: isMe ? theme.colorScheme.onPrimary : theme.colorScheme.onSurface,
+                                      ),
+                                    );
+                                  },
+                                  loadingBuilder: (context, child, progress) {
+                                    if (progress == null) return child;
+                                    return const SizedBox(
+                                      width: 220,
+                                      height: 150,
+                                      child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                                    );
+                                  },
+                                ),
+                              ),
+                            ],
                             const SizedBox(height: 8),
                             Text(
                               '${message.senderUsername.capitalize()} · ${_formatTime(message.createdAt)}',
                               style: theme.textTheme.bodySmall?.copyWith(
-                                color: isMe ? theme.colorScheme.onPrimary.withOpacity(0.75) : theme.colorScheme.onSurface.withOpacity(0.75),
+                                color: isMe ? theme.colorScheme.onPrimary.withValues(alpha: 0.75) : theme.colorScheme.onSurface.withValues(alpha: 0.75),
                               ),
                             ),
                           ],
@@ -3356,18 +3657,23 @@ class _ChatPageState extends State<ChatPage> {
                         border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(16))),
                         contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                       ),
-                      onSubmitted: (_) => _sendMessage(),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  FilledButton(
-                    onPressed: _sendMessage,
-                    child: const Icon(Icons.send),
-                  ),
+                       onSubmitted: (_) => _sendMessage(),
+                     ),
+                   ),
+                   IconButton(
+                     icon: const Icon(Icons.image_outlined),
+                     tooltip: 'Send image',
+                     onPressed: _pickImage,
+                   ),
+                   const SizedBox(width: 4),
+                   FilledButton(
+                     onPressed: () => _sendMessage(),
+                     child: const Icon(Icons.send),
+                   ),
                 ],
               ),
             ),
-          ],
+            ],
         ),
       ),
     );

@@ -218,7 +218,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                   ),
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
-                    value: category,
+                    initialValue: category,
                     decoration: const InputDecoration(
                       labelText: 'Category',
                       border: OutlineInputBorder(),
@@ -234,7 +234,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                   ),
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
-                    value: priority,
+                    initialValue: priority,
                     decoration: const InputDecoration(
                       labelText: 'Priority',
                       border: OutlineInputBorder(),
@@ -341,7 +341,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                   Text(
                     'Track chores, bills, and shared responsibilities in one place.',
                     style: theme.textTheme.bodyMedium?.copyWith(
-                      color: theme.colorScheme.onPrimary.withOpacity(0.9),
+                      color: theme.colorScheme.onPrimary.withValues(alpha: 0.9),
                     ),
                   ),
                 ],
@@ -396,7 +396,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                 ),
               )
             else
-              ..._visibleTasks.map((task) => _buildTaskTile(task, theme)).toList(),
+              ..._visibleTasks.map((task) => _buildTaskTile(task, theme)),
           ],
         ),
       ),

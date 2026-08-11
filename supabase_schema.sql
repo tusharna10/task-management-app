@@ -14,6 +14,7 @@ create table if not exists public.tasks (
   assigned_to text,
   completed boolean not null default false,
   status text not null default 'Planned',
+  image_url text,
   created_at timestamp with time zone default now()
 );
 
@@ -39,6 +40,7 @@ create table if not exists public.monthly_expenses (
   amount numeric not null default 0,
   category text not null default 'Other',
   month_label text not null,
+  deleted boolean not null default false,
   created_at timestamp with time zone default now()
 );
 
@@ -47,6 +49,7 @@ create table if not exists public.chat_messages (
   sender_username text not null,
   recipient_username text not null,
   content text not null,
+  image_url text,
   is_read boolean not null default false,
   created_at timestamp with time zone default now()
 );
@@ -56,6 +59,19 @@ alter table public.tasks enable row level security;
 alter table public.flat_members enable row level security;
 alter table public.rent_entries enable row level security;
 alter table public.monthly_expenses enable row level security;
+
+-- Storage setup required in Supabase Dashboard > Storage:
+-- 1. Create a new public bucket named "chat-images"
+-- 2. Add policies (run these in SQL Editor with service_role):
+drop policy if exists "Allow public upload" on storage.objects;
+create policy "Allow public upload"
+  on storage.objects for insert
+  with check (bucket_id = 'chat-images');
+
+drop policy if exists "Allow public read" on storage.objects;
+create policy "Allow public read"
+  on storage.objects for select
+  using (bucket_id = 'chat-images');
 
 drop policy if exists "Allow public read access to users" on public.users;
 create policy "Allow public read access to users"
@@ -151,3 +167,16 @@ create policy "Allow public update access to monthly_expenses"
   for update
   using (true)
   with check (true);
+
+-- Storage setup for task images:
+-- 1. Create a public bucket named "task-images" in Supabase Dashboard > Storage
+-- 2. Run these policies:
+drop policy if exists "Allow public task image upload" on storage.objects;
+create policy "Allow public task image upload"
+  on storage.objects for insert
+  with check (bucket_id = 'task-images');
+
+drop policy if exists "Allow public task image read" on storage.objects;
+create policy "Allow public task image read"
+  on storage.objects for select
+  using (bucket_id = 'task-images');
