@@ -1511,12 +1511,14 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
 
   List<Task> get _visibleTasks {
     return widget.tasks.where((task) {
-      if (_selectedFilter == 'Pending') return !task.completed;
-      if (_selectedFilter == 'Done') return task.completed;
       if (_selectedDashboardMonth.isNotEmpty && task.dueDate != null) {
         final monthLabel = '${_formatMonth(task.dueDate!)} ${task.dueDate!.year}';
         if (monthLabel != _selectedDashboardMonth) return false;
+      } else if (_selectedDashboardMonth.isNotEmpty && task.dueDate == null) {
+        return false;
       }
+      if (_selectedFilter == 'Pending') return !task.completed;
+      if (_selectedFilter == 'Done') return task.completed;
       return true;
     }).toList();
   }
@@ -1531,6 +1533,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
     _monthlyExpenseEntries
       ..clear()
       ..addAll(widget.monthlyExpenses);
+    _selectedDashboardMonth = _formatMonth(DateTime.now());
   }
 
   @override
@@ -2394,9 +2397,8 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
         ),
         const SizedBox(height: 12),
         DropdownButtonFormField<String>(
-          initialValue: _selectedDashboardMonth.isEmpty ? null : _selectedDashboardMonth,
           decoration: const InputDecoration(
-            labelText: 'Filter by month',
+            labelText: 'Select month',
             border: OutlineInputBorder(),
           ),
           items: _buildMonthOptions().map((month) {
@@ -2417,7 +2419,7 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
             child: Padding(
               padding: const EdgeInsets.all(24),
               child: Text(
-                'No tasks here yet. Add one to get started.',
+                'No tasks found for $_selectedDashboardMonth.',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodyLarge,
               ),
