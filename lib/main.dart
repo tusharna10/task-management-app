@@ -169,6 +169,63 @@ class _MyAppState extends State<MyApp> {
     });
   }
 
+  Future<void> _updateTaskStatus(Task task, String status) async {
+    setState(() {
+      task.status = status;
+      task.completed = status == 'Completed';
+    });
+    await _syncTask(task, isNew: false);
+  }
+
+  Future<void> _syncTask(Task task, {required bool isNew}) async {
+    if (!_shouldUseSupabase() || task.id == null) {
+      return;
+    }
+
+    try {
+      final connected = await _initializeSupabase();
+      if (!connected) {
+        return;
+      }
+
+      final client = Supabase.instance.client;
+      if (isNew) {
+        final response = await client.from('tasks').insert({
+          'title': task.title,
+          'category': task.category,
+          'priority': task.priority,
+          'assigned_to': task.assignedTo,
+          'completed': task.completed,
+          'status': task.status,
+          if (task.imageUrl != null) 'image_url': task.imageUrl,
+          if (task.dueDate != null) 'due_date': task.dueDate!.toIso8601String(),
+          if (task.notes != null && task.notes!.isNotEmpty) 'notes': task.notes,
+          if (task.comments.isNotEmpty) 'comments': task.comments,
+        }).select();
+        final rows = response as List<dynamic>;
+        if (rows.isNotEmpty) {
+          final row = Map<String, dynamic>.from(rows.first as Map);
+          task.id = row['id'] as int?;
+        }
+      } else {
+        await client.from('tasks').update({
+          'title': task.title,
+          'category': task.category,
+          'priority': task.priority,
+          'assigned_to': task.assignedTo,
+          'completed': task.completed,
+          'status': task.status,
+          if (task.imageUrl != null) 'image_url': task.imageUrl,
+          if (task.dueDate != null) 'due_date': task.dueDate!.toIso8601String(),
+          if (task.notes != null && task.notes!.isNotEmpty) 'notes': task.notes,
+          if (task.comments.isNotEmpty) 'comments': task.comments,
+        }).eq('id', task.id!);
+      }
+    } catch (error) {
+      print('Failed to sync task: $error');
+    }
+  }
+
   void _showPendingNotifications(UserAccount user) {
     final pending = _notifications.where((notification) {
       return !notification.isRead && notification.recipientUsername.toLowerCase() == user.username.toLowerCase();
@@ -898,6 +955,20 @@ class _MyAppState extends State<MyApp> {
   List<Task> _parseTasks(List<dynamic> rows) {
     return rows.map((row) {
       final data = Map<String, dynamic>.from(row as Map);
+      final dueDateValue = data['due_date'];
+      DateTime? dueDate;
+      if (dueDateValue is String) {
+        dueDate = DateTime.tryParse(dueDateValue);
+      } else if (dueDateValue is DateTime) {
+        dueDate = dueDateValue;
+      }
+      final commentsValue = data['comments'];
+      final comments = <String>[];
+      if (commentsValue is List) {
+        comments.addAll(commentsValue.map((item) => item.toString()).toList());
+      } else if (commentsValue is String && commentsValue.isNotEmpty) {
+        comments.add(commentsValue);
+      }
       return Task(
         id: data['id'] as int?,
         title: data['title']?.toString() ?? '',
@@ -907,6 +978,9 @@ class _MyAppState extends State<MyApp> {
         completed: data['completed'] == true,
         status: data['status']?.toString() ?? 'Planned',
         imageUrl: data['image_url'] as String?,
+        dueDate: dueDate,
+        notes: data['notes']?.toString(),
+        comments: comments,
       );
     }).toList();
   }
@@ -1052,6 +1126,7 @@ class _MyAppState extends State<MyApp> {
                   chatMessages: _chatMessages,
                   onOpenChat: (context, peerUsername) => _openChat(context, peerUsername),
                   onTaskImageUpdated: (task, imageFile) => _uploadTaskImage(task, imageFile),
+                  onTaskStatusChanged: (task, status) => _updateTaskStatus(task, status),
                 ))
           : LoginPage(
               onLogin: _login,
@@ -1242,8 +1317,8 @@ class UserAccount {
   UserAccount({this.id, required this.username, required this.password, required this.role});
 
   int? id;
-  final String username;
-  final String password;
+  String username;
+  String password;
   final String role;
 }
 
@@ -1257,6 +1332,9 @@ class Task {
     this.completed = false,
     this.status = 'Planned',
     this.imageUrl,
+    this.dueDate,
+    this.notes,
+    this.comments = const [],
   });
 
   int? id;
@@ -1267,6 +1345,9 @@ class Task {
   bool completed;
   String status;
   String? imageUrl;
+  DateTime? dueDate;
+  String? notes;
+  final List<String> comments;
 }
 
 class FlatMember {
@@ -1691,6 +1772,9 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
           'completed': task.completed,
           'status': task.status,
           if (task.imageUrl != null) 'image_url': task.imageUrl,
+          if (task.dueDate != null) 'due_date': task.dueDate!.toIso8601String(),
+          if (task.notes != null && task.notes!.isNotEmpty) 'notes': task.notes,
+          if (task.comments.isNotEmpty) 'comments': task.comments,
         }).select();
         final rows = response as List<dynamic>;
         if (rows.isNotEmpty) {
@@ -1707,6 +1791,9 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
           'completed': task.completed,
           'status': task.status,
           if (task.imageUrl != null) 'image_url': task.imageUrl,
+          if (task.dueDate != null) 'due_date': task.dueDate!.toIso8601String(),
+          if (task.notes != null && task.notes!.isNotEmpty) 'notes': task.notes,
+          if (task.comments.isNotEmpty) 'comments': task.comments,
         }).eq('id', task.id!);
       }
       _setSupabaseStatus('Task synced to Supabase', connected: true);
@@ -1754,15 +1841,17 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
     String category = 'Cleaning';
     String priority = 'Medium';
     String? assignedTo = widget.members.isNotEmpty ? widget.members.first.name : null;
+    DateTime? dueDate;
+    final notesController = TextEditingController();
 
     await showDialog<void>(
       context: context,
       builder: (context) {
-        return AlertDialog(
-          title: const Text('Add a task'),
-          content: StatefulBuilder(
-            builder: (context, setDialogState) {
-              return SingleChildScrollView(
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Add a task'),
+              content: SingleChildScrollView(
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 360),
                   child: Column(
@@ -1823,47 +1912,84 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                           }
                         },
                       ),
+                      const SizedBox(height: 12),
+                      InkWell(
+                        onTap: () async {
+                          final picked = await showDatePicker(
+                            context: context,
+                            initialDate: dueDate ?? DateTime.now().add(const Duration(days: 1)),
+                            firstDate: DateTime.now(),
+                            lastDate: DateTime.now().add(const Duration(days: 365)),
+                          );
+                          if (picked != null) {
+                            setDialogState(() => dueDate = picked);
+                          }
+                        },
+                        child: InputDecorator(
+                          decoration: const InputDecoration(
+                            labelText: 'Due date',
+                            border: OutlineInputBorder(),
+                            suffixIcon: Icon(Icons.calendar_today_outlined),
+                          ),
+                          child: Text(
+                            dueDate == null
+                                ? 'No due date'
+                                : '${dueDate!.day}/${dueDate!.month}/${dueDate!.year}',
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: notesController,
+                        decoration: const InputDecoration(
+                          labelText: 'Notes',
+                          border: OutlineInputBorder(),
+                        ),
+                        maxLines: 2,
+                      ),
                     ],
                   ),
                 ),
-              );
-            },
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () async {
-                final title = titleController.text.trim();
-                if (title.isEmpty) {
-                  return;
-                }
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () async {
+                    final title = titleController.text.trim();
+                    if (title.isEmpty) {
+                      return;
+                    }
 
-                final task = Task(
-                  title: title,
-                  category: category,
-                  priority: priority,
-                  assignedTo: assignedTo,
-                );
+                    final task = Task(
+                      title: title,
+                      category: category,
+                      priority: priority,
+                      assignedTo: assignedTo,
+                      dueDate: dueDate,
+                      notes: notesController.text.trim().isEmpty ? null : notesController.text.trim(),
+                    );
 
-                final recipient = assignedTo;
-                if (recipient != null && recipient != 'Admin') {
-                  widget.onAssignTask(recipient, title);
-                }
+                    final recipient = assignedTo;
+                    if (recipient != null && recipient != 'Admin') {
+                      widget.onAssignTask(recipient, title);
+                    }
 
-                setState(() {
-                  widget.tasks.add(task);
-                });
-                await _syncTask(task, isNew: true);
-                if (!mounted) return;
-                if (!context.mounted) return;
-                Navigator.of(context).pop();
-              },
-              child: const Text('Save task'),
-            ),
-          ],
+                    setState(() {
+                      widget.tasks.add(task);
+                    });
+                    await _syncTask(task, isNew: true);
+                    if (!mounted) return;
+                    if (!context.mounted) return;
+                    Navigator.of(context).pop();
+                  },
+                  child: const Text('Save task'),
+                ),
+              ],
+            );
+          },
         );
       },
     );
@@ -2085,6 +2211,12 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
               _buildRentCollectionContent(theme)
             else if (_selectedAdminTab == 'Monthly Expenses')
               _buildMonthlyExpensesContent(theme)
+            else if (_selectedAdminTab == 'Calendar')
+              _buildCalendarContent(theme)
+            else if (_selectedAdminTab == 'Profile')
+              _buildProfileContent(theme)
+            else if (_selectedAdminTab == 'Reminders')
+              _buildRemindersContent(theme)
             else
               _buildUserManagementContent(theme),
           ],
@@ -2132,6 +2264,9 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
               _buildDrawerOption(theme, Icons.chat_bubble_outline, 'Chat', 'Chat'),
               _buildDrawerOption(theme, Icons.attach_money, 'Rent', 'Rent Collection'),
               _buildDrawerOption(theme, Icons.receipt_long_outlined, 'Expenses', 'Monthly Expenses'),
+              _buildDrawerOption(theme, Icons.calendar_today_outlined, 'Calendar', 'Calendar'),
+              _buildDrawerOption(theme, Icons.person_outline, 'Profile', 'Profile'),
+              _buildDrawerOption(theme, Icons.notifications_outlined, 'Reminders', 'Reminders'),
             ],
             const Spacer(),
             Padding(
@@ -2593,10 +2728,10 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
                                  ],
                                ),
                               ),
-                           ],
-                        );
-                      }).toList(),
-                    ),
+                            ],
+                         );
+                }).toList(),
+                     ),
                   ),
                 ],
               ),
@@ -2815,6 +2950,324 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
     );
   }
 
+  Widget _buildCalendarContent(ThemeData theme) {
+    final now = DateTime.now();
+    final selectedMonth = now.month;
+    final selectedYear = now.year;
+    final daysInMonth = DateTime(selectedYear, selectedMonth + 1, 0).day;
+    final firstDayOfWeek = DateTime(selectedYear, selectedMonth, 1).weekday;
+    final tasksByDate = <DateTime, List<Task>>{};
+    final expensesByDate = <DateTime, List<MonthlyExpenseEntry>>{};
+
+    for (final task in widget.tasks) {
+      if (task.dueDate != null &&
+          task.dueDate!.month == selectedMonth &&
+          task.dueDate!.year == selectedYear) {
+        final date = DateTime(task.dueDate!.year, task.dueDate!.month, task.dueDate!.day);
+        tasksByDate.putIfAbsent(date, () => []).add(task);
+      }
+    }
+
+    for (final expense in _monthlyExpenseEntries) {
+      final parts = expense.monthLabel.split(' ');
+      if (parts.length == 2) {
+        final monthIndex = _getMonthIndex(parts[0]);
+        final year = int.tryParse(parts[1]);
+        if (monthIndex == selectedMonth && year == selectedYear) {
+          final date = DateTime(year!, monthIndex, 1);
+          expensesByDate.putIfAbsent(date, () => []).add(expense);
+        }
+      }
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${_getMonthName(selectedMonth)} $selectedYear',
+              style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 16),
+            Table(
+              children: [
+                TableRow(
+                  children: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+                      .map((day) => Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            child: Text(
+                              day,
+                              textAlign: TextAlign.center,
+                              style: theme.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+                            ),
+                          ))
+                      .toList(),
+                ),
+                ...List.generate(((firstDayOfWeek - 1 + daysInMonth) / 7).ceil(), (weekIndex) {
+                  return TableRow(
+                    children: List.generate(7, (dayIndex) {
+                      final dayNumber = weekIndex * 7 + dayIndex - (firstDayOfWeek - 1) + 1;
+                      if (dayNumber < 1 || dayNumber > daysInMonth) {
+                        return const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 12),
+                          child: SizedBox.shrink(),
+                        );
+                      }
+                      final date = DateTime(selectedYear, selectedMonth, dayNumber);
+                      final hasTasks = tasksByDate.containsKey(date);
+                      final hasExpenses = expensesByDate.containsKey(date);
+                      final isToday = date.day == now.day && date.month == now.month && date.year == now.year;
+
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: isToday ? theme.colorScheme.primaryContainer : null,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Column(
+                            children: [
+                              Text(
+                                '$dayNumber',
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  fontWeight: isToday ? FontWeight.w700 : null,
+                                  color: isToday ? theme.colorScheme.onPrimaryContainer : null,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  if (hasTasks)
+                                    Container(
+                                      width: 8,
+                                      height: 8,
+                                      decoration: BoxDecoration(
+                                        color: theme.colorScheme.primary,
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
+                                  if (hasExpenses)
+                                    Container(
+                                      width: 8,
+                                      height: 8,
+                                      margin: const EdgeInsets.only(left: 4),
+                                      decoration: BoxDecoration(
+                                        color: theme.colorScheme.tertiary,
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    }),
+                  );
+                }),
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (tasksByDate.isNotEmpty) ...[
+              Text('Tasks this month', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+              const SizedBox(height: 8),
+              ...tasksByDate.entries.map((entry) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 12,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.primary,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text('${entry.key.day}/${entry.key.month}: ${entry.value.map((t) => t.title).join(", ")}'),
+                    ],
+                  ),
+                );
+              }),
+            ],
+            if (expensesByDate.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text('Expenses this month', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+              const SizedBox(height: 8),
+              ...expensesByDate.entries.map((entry) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 12,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.tertiary,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text('${entry.key.day}/${entry.key.month}: ${entry.value.map((e) => e.title).join(", ")}'),
+                    ],
+                  ),
+                );
+              }),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  int _getMonthIndex(String monthName) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return months.indexOf(monthName) + 1;
+  }
+
+  String _getMonthName(int month) {
+    const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    return months[month - 1];
+  }
+
+  Widget _buildProfileContent(ThemeData theme) {
+    final currentUser = widget.currentUser;
+    final usernameController = TextEditingController(text: currentUser.username);
+    final passwordController = TextEditingController(text: currentUser.password);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Your Profile',
+              style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: usernameController,
+              decoration: const InputDecoration(
+                labelText: 'Username',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: passwordController,
+              decoration: const InputDecoration(
+                labelText: 'Password',
+                border: OutlineInputBorder(),
+              ),
+              obscureText: true,
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: () async {
+                final newUsername = usernameController.text.trim();
+                final newPassword = passwordController.text.trim();
+                if (newUsername.isEmpty || newPassword.isEmpty) {
+                  return;
+                }
+
+                final userIndex = widget.users.indexWhere((user) => user.username == currentUser.username);
+                if (userIndex != -1) {
+                  setState(() {
+                    widget.users[userIndex].username = newUsername;
+                    widget.users[userIndex].password = newPassword;
+                  });
+                }
+
+                try {
+                  final client = Supabase.instance.client;
+                  await client.from('users').update({
+                    'username': newUsername,
+                    'password': newPassword,
+                  }).eq('username', currentUser.username);
+                } catch (e) {
+                  print('Failed to update profile: $e');
+                }
+              },
+              icon: const Icon(Icons.save_outlined),
+              label: const Text('Save changes'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRemindersContent(ThemeData theme) {
+    final now = DateTime.now();
+    final upcomingTasks = widget.tasks.where((task) {
+      if (task.completed || task.dueDate == null) return false;
+      final difference = task.dueDate!.difference(now).inDays;
+      return difference >= 0 && difference <= 7;
+    }).toList();
+
+    final overdueTasks = widget.tasks.where((task) {
+      if (task.completed || task.dueDate == null) return false;
+      return task.dueDate!.isBefore(now);
+    }).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (overdueTasks.isNotEmpty) ...[
+          Text('Overdue tasks', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700, color: Colors.red)),
+          const SizedBox(height: 8),
+          ...overdueTasks.map((task) => Card(
+            margin: const EdgeInsets.only(bottom: 8),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  Icon(Icons.warning_amber_rounded, color: Colors.red.shade400),
+                  const SizedBox(width: 12),
+                  Expanded(child: Text(task.title)),
+                ],
+              ),
+            ),
+          )),
+          const SizedBox(height: 16),
+        ],
+        if (upcomingTasks.isNotEmpty) ...[
+          Text('Upcoming tasks (next 7 days)', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 8),
+          ...upcomingTasks.map((task) {
+            final daysLeft = task.dueDate!.difference(now).inDays;
+            return Card(
+              margin: const EdgeInsets.only(bottom: 8),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    Icon(Icons.schedule_outlined, color: Colors.orange.shade400),
+                    const SizedBox(width: 12),
+                    Expanded(child: Text(task.title)),
+                    Text('$daysLeft days left', style: theme.textTheme.bodySmall?.copyWith(color: Colors.orange)),
+                  ],
+                ),
+              ),
+            );
+          }),
+        ],
+        if (overdueTasks.isEmpty && upcomingTasks.isEmpty)
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text('No upcoming reminders.', textAlign: TextAlign.center, style: theme.textTheme.bodyLarge),
+            ),
+          ),
+      ],
+    );
+  }
+
   Widget _buildUsersView(ThemeData theme) {
     final roommates = widget.users.where((user) => user.role == 'roommate').toList();
 
@@ -3016,91 +3469,248 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
   }
 
   Widget _buildTaskTile(Task task, ThemeData theme) {
+    final priorityColor = task.priority == 'High'
+        ? Colors.red
+        : task.priority == 'Medium'
+            ? Colors.orange
+            : Colors.green;
+    final isOverdue = task.dueDate != null &&
+        !task.completed &&
+        task.dueDate!.isBefore(DateTime.now());
+
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Checkbox(
-              value: task.completed,
-              onChanged: (_) => _toggleTask(task),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    task.title,
-                    style: theme.textTheme.bodyLarge?.copyWith(
-                      decoration: task.completed ? TextDecoration.lineThrough : null,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text('${task.category} • ${task.priority} priority'),
-                  const SizedBox(height: 4),
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 4,
-                    children: [
-                      Chip(
-                        label: Text(task.category),
-                        visualDensity: VisualDensity.compact,
-                        backgroundColor: theme.colorScheme.secondaryContainer,
-                      ),
-                      if (task.assignedTo != null)
-                        Chip(
-                          label: Text(task.assignedTo!),
-                          visualDensity: VisualDensity.compact,
-                        ),
-                      Chip(
-                        label: Text(task.status),
-                        visualDensity: VisualDensity.compact,
-                        backgroundColor: task.status == 'Completed'
-                            ? Colors.green.shade100
-                            : task.status == 'Started'
-                                ? Colors.orange.shade100
-                                : Colors.blue.shade100,
-                      ),
-                      if (task.imageUrl != null)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: InkWell(
-                            onTap: () {
-                              showDialog(
-                                context: context,
-                                builder: (context) => Dialog(
-                                  child: InteractiveViewer(
-                                    child: Image.network(task.imageUrl!, fit: BoxFit.contain),
-                                  ),
-                                ),
-                              );
-                            },
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(8),
-                              child: Image.network(
-                                task.imageUrl!,
-                                width: 60,
-                                height: 60,
-                                fit: BoxFit.cover,
-                                errorBuilder: (context, error, stackTrace) {
-                                  return const Icon(Icons.broken_image, size: 40);
-                                },
-                              ),
+      child: InkWell(
+        onTap: () => _showTaskDetailDialog(task),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Checkbox(
+                value: task.completed,
+                onChanged: (_) => _toggleTask(task),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            task.title,
+                            style: theme.textTheme.bodyLarge?.copyWith(
+                              decoration: task.completed ? TextDecoration.lineThrough : null,
+                              fontWeight: FontWeight.w600,
                             ),
                           ),
                         ),
+                        Container(
+                          width: 12,
+                          height: 12,
+                          decoration: BoxDecoration(
+                            color: priorityColor,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text('${task.category} • ${task.priority} priority'),
+                    if (task.dueDate != null) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        'Due: ${task.dueDate!.day}/${task.dueDate!.month}/${task.dueDate!.year}',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: isOverdue ? Colors.red : null,
+                          fontWeight: isOverdue ? FontWeight.w600 : null,
+                        ),
+                      ),
                     ],
-                  ),
-                ],
+                    if (task.notes != null && task.notes!.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        task.notes!,
+                        style: theme.textTheme.bodySmall,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                    const SizedBox(height: 4),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        Chip(
+                          label: Text(task.category),
+                          visualDensity: VisualDensity.compact,
+                          backgroundColor: theme.colorScheme.secondaryContainer,
+                        ),
+                        if (task.assignedTo != null)
+                          Chip(
+                            label: Text(task.assignedTo!),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                        Chip(
+                          label: Text(task.status),
+                          visualDensity: VisualDensity.compact,
+                          backgroundColor: task.status == 'Completed'
+                              ? Colors.green.shade100
+                              : task.status == 'Started'
+                                  ? Colors.orange.shade100
+                                  : Colors.blue.shade100,
+                        ),
+                        if (task.comments.isNotEmpty)
+                          Chip(
+                            label: Text('${task.comments.length} comments'),
+                            visualDensity: VisualDensity.compact,
+                            backgroundColor: theme.colorScheme.tertiaryContainer,
+                          ),
+                        if (task.imageUrl != null)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 8),
+                            child: InkWell(
+                              onTap: () {
+                                showDialog(
+                                  context: context,
+                                  builder: (context) => Dialog(
+                                    child: InteractiveViewer(
+                                      child: Image.network(task.imageUrl!, fit: BoxFit.contain),
+                                    ),
+                                  ),
+                                );
+                              },
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: Image.network(
+                                  task.imageUrl!,
+                                  width: 60,
+                                  height: 60,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (context, error, stackTrace) {
+                                    return const Icon(Icons.broken_image, size: 40);
+                                  },
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
+    );
+  }
+
+  Future<void> _showTaskDetailDialog(Task task) async {
+    final commentController = TextEditingController();
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: Text(task.title),
+              content: SingleChildScrollView(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 400),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Category: ${task.category}'),
+                      const SizedBox(height: 4),
+                      Text('Priority: ${task.priority}'),
+                      const SizedBox(height: 4),
+                      Text('Status: ${task.status}'),
+                      if (task.assignedTo != null) ...[
+                        const SizedBox(height: 4),
+                        Text('Assigned to: ${task.assignedTo}'),
+                      ],
+                      if (task.dueDate != null) ...[
+                        const SizedBox(height: 4),
+                        Text('Due: ${task.dueDate!.day}/${task.dueDate!.month}/${task.dueDate!.year}'),
+                      ],
+                      if (task.notes != null && task.notes!.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        const Text('Notes:', style: TextStyle(fontWeight: FontWeight.w600)),
+                        const SizedBox(height: 4),
+                        Text(task.notes!),
+                      ],
+                      if (task.comments.isNotEmpty) ...[
+                        const SizedBox(height: 16),
+                        const Text('Comments:', style: TextStyle(fontWeight: FontWeight.w600)),
+                        const SizedBox(height: 8),
+                        ...task.comments.map((comment) => Padding(
+                          padding: const EdgeInsets.only(bottom: 6),
+                          child: Text(comment),
+                        )),
+                      ],
+                      const SizedBox(height: 16),
+                      const Text('Add comment:', style: TextStyle(fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: commentController,
+                        decoration: const InputDecoration(
+                          hintText: 'Write a comment...',
+                          border: OutlineInputBorder(),
+                        ),
+                        maxLines: 2,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Close'),
+                ),
+                FilledButton(
+                  onPressed: () async {
+                    final comment = commentController.text.trim();
+                    if (comment.isEmpty) {
+                      return;
+                    }
+                    final updatedTask = Task(
+                      id: task.id,
+                      title: task.title,
+                      category: task.category,
+                      priority: task.priority,
+                      assignedTo: task.assignedTo,
+                      completed: task.completed,
+                      status: task.status,
+                      imageUrl: task.imageUrl,
+                      dueDate: task.dueDate,
+                      notes: task.notes,
+                      comments: List<String>.from(task.comments)..add(comment),
+                    );
+                    setState(() {
+                      final index = widget.tasks.indexWhere((t) => t.id == task.id);
+                      if (index != -1) {
+                        widget.tasks[index] = updatedTask;
+                      }
+                    });
+                    await _syncTask(updatedTask, isNew: false);
+                    if (!mounted) return;
+                    if (dialogContext.mounted) {
+                      Navigator.of(dialogContext).pop();
+                    }
+                  },
+                  child: const Text('Add comment'),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 }
@@ -3117,6 +3727,7 @@ class RoommateHome extends StatefulWidget {
     required this.chatMessages,
     required this.onOpenChat,
     required this.onTaskImageUpdated,
+    required this.onTaskStatusChanged,
   });
 
   final UserAccount currentUser;
@@ -3128,6 +3739,7 @@ class RoommateHome extends StatefulWidget {
   final List<ChatMessage> chatMessages;
   final void Function(BuildContext context, String peerUsername) onOpenChat;
   final Future<String?> Function(Task task, XFile imageFile) onTaskImageUpdated;
+  final Future<void> Function(Task task, String status) onTaskStatusChanged;
 
   @override
   State<RoommateHome> createState() => _RoommateHomeState();
@@ -3202,26 +3814,12 @@ class _RoommateHomeState extends State<RoommateHome> {
     return _tenantRentEntries.fold<double>(0, (sum, entry) => sum + entry.totalAmount);
   }
 
-  void _updateTaskStatus(Task task, String status) {
+  Future<void> _updateTaskStatus(Task task, String status) async {
     setState(() {
       task.status = status;
       task.completed = status == 'Completed';
     });
-  }
-
-  Future<void> _pickTaskImage(Task task) async {
-    final picker = ImagePicker();
-    final picked = await picker.pickImage(source: ImageSource.gallery, maxWidth: 800);
-    if (picked == null) {
-      return;
-    }
-
-    final error = await widget.onTaskImageUpdated(task, picked);
-    if (error != null && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error)),
-      );
-    }
+    await widget.onTaskStatusChanged(task, status);
   }
 
   @override
@@ -3415,61 +4013,91 @@ class _RoommateHomeState extends State<RoommateHome> {
               )
             else
               ..._assignedTasks.map((task) {
+                final priorityColor = task.priority == 'High'
+                    ? Colors.red
+                    : task.priority == 'Medium'
+                        ? Colors.orange
+                        : Colors.green;
+                final isOverdue = task.dueDate != null &&
+                    !task.completed &&
+                    task.dueDate!.isBefore(DateTime.now());
                 return Card(
                   margin: const EdgeInsets.only(bottom: 10),
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                task.title,
-                                style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
-                              ),
-                            ),
-                            if (task.status != 'Completed')
-                              FilledButton.tonal(
-                                onPressed: () => _updateTaskStatus(task, 'Started'),
-                                child: const Text('Pick up'),
-                              ),
-                            if (task.status == 'Completed')
-                              IconButton(
-                                icon: Icon(
-                                  task.imageUrl != null ? Icons.check_circle : Icons.image_outlined,
-                                  color: task.imageUrl != null ? Colors.green : theme.colorScheme.primary,
+                  child: InkWell(
+                    onTap: () => widget.onOpenChat(context, 'admin'),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  task.title,
+                                  style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w600),
                                 ),
-                                tooltip: task.imageUrl != null ? 'Image attached' : 'Attach completion image',
-                                onPressed: () => _pickTaskImage(task),
                               ),
-                          ],
-                        ),
-                        const SizedBox(height: 6),
-                        Text('${task.category} • ${task.priority} priority'),
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 8,
-                          children: [
-                            ChoiceChip(
-                              label: const Text('Planned'),
-                              selected: task.status == 'Planned',
-                              onSelected: (_) => _updateTaskStatus(task, 'Planned'),
-                            ),
-                            ChoiceChip(
-                              label: const Text('Started'),
-                              selected: task.status == 'Started',
-                              onSelected: (_) => _updateTaskStatus(task, 'Started'),
-                            ),
-                            ChoiceChip(
-                              label: const Text('Completed'),
-                              selected: task.status == 'Completed',
-                              onSelected: (_) => _updateTaskStatus(task, 'Completed'),
+                              Container(
+                                width: 12,
+                                height: 12,
+                                decoration: BoxDecoration(
+                                  color: priorityColor,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Text('${task.category} • ${task.priority} priority'),
+                          if (task.dueDate != null) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              'Due: ${task.dueDate!.day}/${task.dueDate!.month}/${task.dueDate!.year}',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: isOverdue ? Colors.red : null,
+                                fontWeight: isOverdue ? FontWeight.w600 : null,
+                              ),
                             ),
                           ],
-                        ),
-                      ],
+                          if (task.notes != null && task.notes!.isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              task.notes!,
+                              style: theme.textTheme.bodySmall,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                          const SizedBox(height: 8),
+                          Wrap(
+                            spacing: 8,
+                            children: [
+                              ChoiceChip(
+                                label: const Text('Planned'),
+                                selected: task.status == 'Planned',
+                                onSelected: (_) => _updateTaskStatus(task, 'Planned'),
+                              ),
+                              ChoiceChip(
+                                label: const Text('Started'),
+                                selected: task.status == 'Started',
+                                onSelected: (_) => _updateTaskStatus(task, 'Started'),
+                              ),
+                              ChoiceChip(
+                                label: const Text('Completed'),
+                                selected: task.status == 'Completed',
+                                onSelected: (_) => _updateTaskStatus(task, 'Completed'),
+                              ),
+                              if (task.comments.isNotEmpty)
+                                Chip(
+                                  label: Text('${task.comments.length} comments'),
+                                  visualDensity: VisualDensity.compact,
+                                  backgroundColor: theme.colorScheme.tertiaryContainer,
+                                ),
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 );
@@ -3702,3 +4330,4 @@ extension StringExtension on String {
     return this[0].toUpperCase() + substring(1);
   }
 }
+

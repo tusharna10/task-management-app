@@ -15,6 +15,9 @@ create table if not exists public.tasks (
   completed boolean not null default false,
   status text not null default 'Planned',
   image_url text,
+  due_date timestamp with time zone,
+  notes text,
+  comments text[] default '{}',
   created_at timestamp with time zone default now()
 );
 
