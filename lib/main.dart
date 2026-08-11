@@ -1494,6 +1494,7 @@ class TaskManagementHome extends StatefulWidget {
 class _TaskManagementHomeState extends State<TaskManagementHome> {
   String _selectedFilter = 'All';
   String _selectedAdminTab = 'Dashboard';
+  String _selectedDashboardMonth = '';
   final TextEditingController _totalRentController = TextEditingController(text: '14000');
   String _selectedRentMonth = '';
   final List<String> _selectedRentMembers = [];
@@ -1512,6 +1513,10 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
     return widget.tasks.where((task) {
       if (_selectedFilter == 'Pending') return !task.completed;
       if (_selectedFilter == 'Done') return task.completed;
+      if (_selectedDashboardMonth.isNotEmpty && task.dueDate != null) {
+        final monthLabel = '${_formatMonth(task.dueDate!)} ${task.dueDate!.year}';
+        if (monthLabel != _selectedDashboardMonth) return false;
+      }
       return true;
     }).toList();
   }
@@ -2386,6 +2391,20 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
               },
             );
           }).toList(),
+        ),
+        const SizedBox(height: 12),
+        DropdownButtonFormField<String>(
+          initialValue: _selectedDashboardMonth.isEmpty ? null : _selectedDashboardMonth,
+          decoration: const InputDecoration(
+            labelText: 'Filter by month',
+            border: OutlineInputBorder(),
+          ),
+          items: _buildMonthOptions().map((month) {
+            return DropdownMenuItem<String>(value: month, child: Text(month));
+          }).toList(),
+          onChanged: (value) {
+            setState(() => _selectedDashboardMonth = value ?? '');
+          },
         ),
         const SizedBox(height: 12),
         Text(
