@@ -70,5 +70,7 @@
  	<string>This app needs access to photos to send images in chat.</string>
  	<key>NSPhotoLibraryAddUsageDescription</key>
  	<string>This app needs permission to save photos.</string>
+ 	<key>NSHumanReadableCopyright</key>
+ 	<string>Copyright © 2026 Tushar Narkhede. All rights reserved.</string>
  </dict>
 </plist>
