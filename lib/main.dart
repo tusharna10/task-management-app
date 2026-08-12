@@ -1514,8 +1514,6 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
       if (_selectedDashboardMonth.isNotEmpty && task.dueDate != null) {
         final monthLabel = '${_formatMonth(task.dueDate!)} ${task.dueDate!.year}';
         if (monthLabel != _selectedDashboardMonth) return false;
-      } else if (_selectedDashboardMonth.isNotEmpty && task.dueDate == null) {
-        return false;
       }
       if (_selectedFilter == 'Pending') return !task.completed;
       if (_selectedFilter == 'Done') return task.completed;
@@ -1533,7 +1531,6 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
     _monthlyExpenseEntries
       ..clear()
       ..addAll(widget.monthlyExpenses);
-    _selectedDashboardMonth = _formatMonth(DateTime.now());
   }
 
   @override
@@ -2401,9 +2398,12 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
             labelText: 'Select month',
             border: OutlineInputBorder(),
           ),
-          items: _buildMonthOptions().map((month) {
-            return DropdownMenuItem<String>(value: month, child: Text(month));
-          }).toList(),
+          items: [
+            const DropdownMenuItem<String>(value: '', child: Text('All months')),
+            ..._buildMonthOptions().map((month) {
+              return DropdownMenuItem<String>(value: month, child: Text(month));
+            }),
+          ],
           onChanged: (value) {
             setState(() => _selectedDashboardMonth = value ?? '');
           },
@@ -2419,7 +2419,9 @@ class _TaskManagementHomeState extends State<TaskManagementHome> {
             child: Padding(
               padding: const EdgeInsets.all(24),
               child: Text(
-                'No tasks found for $_selectedDashboardMonth.',
+                _selectedDashboardMonth.isEmpty
+                    ? 'No tasks here yet. Add one to get started.'
+                    : 'No tasks found for $_selectedDashboardMonth.',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodyLarge,
               ),
